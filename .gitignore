@@ -1,0 +1,5 @@
+.idea/
+*.iml
+*.so
+/server/server
+/ssh-broker-agent/ssh-broker-agent
