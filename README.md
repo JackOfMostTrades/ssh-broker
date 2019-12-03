@@ -6,6 +6,14 @@ For the most part you could use [SSH certificates](https://github.com/openssh/op
 
 This goal of this project is to make it easier to dynamically grant and revoke access to SSH keypairs. For example, users can be granted temporary access and you will not need to rotate the SSH keys since they never leave the server.
 
+## Architecture
+
+![Architecture](architecture.svg)
+
+1. `ssh` makes a request to a remote server and gets a signature challenge.
+2. `ssh` talks to the local `ssh-broker-agent` process to do a signature.
+3. `ssh-broker-agent` requests that the `ssh-broker-server` create the signature with its private key. If authorized, the signature gets returned back to the ssh process via the agent.
+
 # Example
 
 Here's an example starting the server:
