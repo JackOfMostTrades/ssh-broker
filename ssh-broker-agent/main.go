@@ -20,11 +20,12 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type Agent struct {
 	sshKeyNames []string
-	broker common.SshBroker
+	broker      common.SshBroker
 }
 
 func (a *Agent) Extension(extensionType string, contents []byte) ([]byte, error) {
@@ -86,8 +87,8 @@ func (a *Agent) List() ([]*agent.Key, error) {
 			return nil, fmt.Errorf("unable to convert public key to SSH key: %T %w", pubKey, err)
 		}
 		keys = append(keys, &agent.Key{
-			Format: sshPubKey.Type(),
-			Blob: sshPubKey.Marshal(),
+			Format:  sshPubKey.Type(),
+			Blob:    sshPubKey.Marshal(),
 			Comment: k.KeyName,
 		})
 	}
@@ -119,28 +120,28 @@ func (a *Agent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Signat
 	var algo common.SignatureAlgorithm
 	var format string
 	switch key.Type() {
-		case ssh.KeyAlgoRSA:
-			if (flags & agent.SignatureFlagRsaSha256) != 0 {
-				algo = common.SignatureAlgorithm_SHA256withRSA
-				format = ssh.SigAlgoRSASHA2512
-			} else if (flags & agent.SignatureFlagRsaSha512) != 0 {
-				algo = common.SignatureAlgorithm_SHA512withRSA
-				format = ssh.SigAlgoRSASHA2512
-			} else {
-				algo = common.SignatureAlgorithm_SHA1withRSA
-				format = ssh.SigAlgoRSA
-			}
-		case ssh.KeyAlgoECDSA256:
-			algo = common.SignatureAlgorithm_SHA256withECDSA
-			format = ssh.KeyAlgoECDSA256
-		default:
-			return nil, fmt.Errorf("unsupport key type: %s", key.Type())
+	case ssh.KeyAlgoRSA:
+		if (flags & agent.SignatureFlagRsaSha256) != 0 {
+			algo = common.SignatureAlgorithm_SHA256withRSA
+			format = ssh.SigAlgoRSASHA2512
+		} else if (flags & agent.SignatureFlagRsaSha512) != 0 {
+			algo = common.SignatureAlgorithm_SHA512withRSA
+			format = ssh.SigAlgoRSASHA2512
+		} else {
+			algo = common.SignatureAlgorithm_SHA1withRSA
+			format = ssh.SigAlgoRSA
+		}
+	case ssh.KeyAlgoECDSA256:
+		algo = common.SignatureAlgorithm_SHA256withECDSA
+		format = ssh.KeyAlgoECDSA256
+	default:
+		return nil, fmt.Errorf("unsupport key type: %s", key.Type())
 	}
 
 	sig, err := a.broker.Sign(context.Background(), &common.SignRequest{
-		PublicKey: pubKeyBytes,
+		PublicKey:          pubKeyBytes,
 		SignatureAlgorithm: algo,
-		Data: data,
+		Data:               data,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to remote sign: %w", err)
@@ -163,11 +164,12 @@ func (a *Agent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Signat
 
 	return &ssh.Signature{
 		Format: format,
-		Blob: blob,
+		Blob:   blob,
 	}, nil
 }
 
 type arrayFlags []string
+
 func (i *arrayFlags) String() string {
 	return strings.Join(*i, ",")
 }
@@ -178,6 +180,7 @@ func (i *arrayFlags) Set(value string) error {
 
 func main() {
 	flagSet := flag.NewFlagSet("ssh-broker-agent", flag.ContinueOnError)
+	forkArg := flagSet.Bool("fork", false, "Fork (daemonize) the process rather than running interactively")
 	hostname := flagSet.String("hostname", "", "Hostname (and optionally port) of ssh-broker service")
 	certPath := flagSet.String("cert", "", "Path to client certificate")
 	keyPath := flagSet.String("key", "", "Path to client key")
@@ -190,6 +193,40 @@ func main() {
 	err := flagSet.Parse(os.Args[1:])
 	if err != nil {
 		panic(err)
+	}
+
+	if *forkArg {
+		// This simulates "fork" by calling ForkExec with the same executable and the same args, minus the --fork
+		executable, err := os.Executable()
+		if err != nil {
+			panic(fmt.Errorf("unable to determine executable path: %w", err))
+		}
+
+		args := []string{os.Args[0]}
+		flagSet.VisitAll(func(flag *flag.Flag) {
+			// Omit the fork flag
+			if flag.Name == "fork" {
+				return
+			}
+			val := flag.Value.String()
+			if val != "" {
+				args = append(args, "--"+flag.Name, flag.Value.String())
+			}
+		})
+		_, err = syscall.ForkExec(executable, args, nil)
+		if err != nil {
+			panic(err)
+		}
+
+		// Wait until socket is listening...
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if isAgentListening(*socketPath) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return
 	}
 
 	if *hostname == "" {
@@ -224,19 +261,20 @@ func main() {
 	var a agent.ExtendedAgent = &Agent{
 		sshKeyNames: *sshKeyNames,
 		broker: &SshBrokerClient{
-			hostname: *hostname,
+			hostname:  *hostname,
 			tlsConfig: tlsConfig,
 		},
 	}
 
-	if os.Stat(*socketPath); err == nil {
-		conn, err := net.Dial("unix", *socketPath)
-		if err != nil {
-			os.Remove(*socketPath)
-		} else {
-			conn.Close()
+	if _, err := os.Stat(*socketPath); err == nil {
+		if isAgentListening(*socketPath) {
 			log.Println("Detected already listening agent...")
 			return
+		} else {
+			err := os.Remove(*socketPath)
+			if err != nil {
+				panic(err)
+			}
 		}
 	}
 
@@ -269,4 +307,17 @@ func main() {
 
 	shuttingDown = true
 	log.Println("Shutting down cleanly...")
+}
+
+func isAgentListening(socketPath string) bool {
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		return false
+	}
+
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
