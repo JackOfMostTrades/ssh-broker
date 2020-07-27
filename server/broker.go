@@ -55,11 +55,16 @@ func (s *sshBrokerImpl) Sign(ctx context.Context, request *common.SignRequest) (
 				return nil, fmt.Errorf("invalid signature algorithm: %s", request.SignatureAlgorithm)
 			}
 
-			h := hash.New()
-			h.Write(request.Data)
-			h.Sum(nil)
+			var digest []byte
+			if request.IsDigested {
+				digest = request.Data
+			} else {
+				h := hash.New()
+				h.Write(request.Data)
+				digest = h.Sum(nil)
+			}
 
-			sig, err := key.Signer.Sign(rand.Reader, h.Sum(nil), hash)
+			sig, err := key.Signer.Sign(rand.Reader, digest, hash)
 			if err != nil {
 				return nil, fmt.Errorf("unable to generate signature: %w", err)
 			}

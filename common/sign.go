@@ -15,6 +15,7 @@ type SignRequest struct {
 	PublicKey []byte `json:"publicKey"`
 	SignatureAlgorithm SignatureAlgorithm `json:"signatureAlgorithm"`
 	Data []byte `json:"data"`
+	IsDigested bool `json:"isDigested"`
 }
 
 type SignResponse struct {

@@ -2,51 +2,27 @@
 #include <string.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
+#include <openssl/x509.h>
 #include <pkcs11.h>
+#include "ssh_broker_client.h"
 
 static_assert(sizeof(CK_SESSION_HANDLE) >= sizeof(void*), "Session handles are not big enough to hold a pointer to the session struct on this architecture");
 static_assert(sizeof(CK_OBJECT_HANDLE) >= sizeof(void*), "Object handles are not big enough to hold a pointer to the session struct on this architecture");
-
-const unsigned char PRIVATE_KEY_PKCS8[] = {
-  0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86,
-  0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
-  0x03, 0x01, 0x07, 0x04, 0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20,
-  0x34, 0x8e, 0x05, 0x25, 0x85, 0x28, 0x6b, 0xac, 0x46, 0xda, 0x89, 0x65,
-  0xb3, 0x84, 0x3a, 0xd5, 0x07, 0xa4, 0x5d, 0x67, 0x24, 0xbb, 0xa6, 0x5c,
-  0x47, 0xa1, 0xb9, 0x5f, 0x26, 0x0e, 0x1c, 0xc0, 0xa1, 0x44, 0x03, 0x42,
-  0x00, 0x04, 0xba, 0x92, 0x07, 0xe1, 0xbe, 0x69, 0x91, 0x7f, 0x17, 0x30,
-  0x30, 0x16, 0xd3, 0xa2, 0x34, 0x2e, 0xaf, 0xe0, 0xdf, 0xd4, 0x3f, 0x60,
-  0x78, 0x38, 0x55, 0x3a, 0x84, 0xea, 0xd3, 0xd1, 0x63, 0x41, 0xd9, 0x4b,
-  0x4e, 0xa6, 0x65, 0x67, 0x97, 0xd6, 0x5d, 0xf5, 0x05, 0x8e, 0x43, 0x1f,
-  0xec, 0xbb, 0xbf, 0x53, 0xe0, 0x35, 0xbe, 0xc1, 0x2b, 0x1d, 0xcf, 0x12,
-  0x57, 0x1c, 0x9a, 0x9d, 0x45, 0xf1
-};
 
 typedef struct _session {
     CK_ATTRIBUTE_PTR find_objects_template;
     CK_ULONG find_objects_template_count;
     unsigned long find_objects_index;
+    ListKeysResponse* key_data;
+
+    unsigned long sign_key_index;
 } CkSession;
 
-EVP_PKEY* private_key = NULL;
-
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
-    if (private_key == NULL) {
-        const unsigned char* buffer = (const unsigned char*)PRIVATE_KEY_PKCS8;
-        private_key = d2i_AutoPrivateKey(NULL, &buffer, sizeof(PRIVATE_KEY_PKCS8));
-        if (private_key == NULL) {
-            return CKR_FUNCTION_FAILED;
-        }
-    }
-
     return CKR_OK;
 }
 
 CK_RV C_Finalize(CK_VOID_PTR pReserved) {
-    if (private_key != NULL) {
-        EVP_PKEY_free(private_key);
-        private_key = NULL;
-    }
     return CKR_OK;
 }
 
@@ -117,6 +93,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApplication,
     if (session == NULL) {
         return CKR_HOST_MEMORY;
     }
+    session->key_data = list_keys();
 
     *phSession = (CK_SESSION_HANDLE)session;
     return CKR_OK;
@@ -127,6 +104,7 @@ CK_RV C_CloseSession(CK_SESSION_HANDLE hSession) {
     if (session == NULL) {
         return CKR_SESSION_HANDLE_INVALID;
     }
+    ListKeysResponse_free(session->key_data);
     free(session);
     return CKR_OK;
 }
@@ -155,7 +133,7 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTemplate, 
     return CKR_OK;
 }
 
-static CK_BBOOL matches_template(CkSession* session, CK_ULONG objIndex) {
+static CK_BBOOL matches_template(CkSession* session, RemoteKey* key) {
     CK_OBJECT_CLASS clazz;
     for (CK_ULONG i = 0; i < session->find_objects_template_count; i++) {
         CK_ATTRIBUTE attr = session->find_objects_template[i];
@@ -167,13 +145,22 @@ static CK_BBOOL matches_template(CkSession* session, CK_ULONG objIndex) {
                 }
                 break;
             case CKA_ID:
-                // We don't actually use this right now, so always match whatever ID is passed in
+                if (attr.ulValueLen != key->public_key_length) {
+                    return CK_FALSE;
+                }
+                const unsigned char* attrVal = (const unsigned char*)attr.pValue;
+                for (size_t i = 0; i < key->public_key_length; i++) {
+                    if (key->public_key[i] != attrVal[i]) {
+                        return CK_FALSE;
+                    }
+                }
                 break;
             case CKA_SIGN:
                 // All objects allow signing
                 if (*((CK_BBOOL*)attr.pValue) == CK_FALSE) {
                     return CK_FALSE;
                 }
+                break;
             default:
                 return CK_FALSE;
         }
@@ -187,9 +174,14 @@ CK_RV C_FindObjects(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE_PTR phObject, C
         return CKR_SESSION_HANDLE_INVALID;
     }
 
+    if (session->key_data == NULL) {
+        *pulObjectCount = 0;
+        return CKR_OK;
+    }
+
     unsigned long foundObjects = 0;
-    while (foundObjects < ulMaxObjectCount && session->find_objects_index < 1) {
-        if (matches_template(session, session->find_objects_index)) {
+    while (foundObjects < ulMaxObjectCount && session->find_objects_index < session->key_data->keys_length) {
+        if (matches_template(session, session->key_data->keys[session->find_objects_index])) {
             phObject[foundObjects] = session->find_objects_index;
             foundObjects += 1;
         }
@@ -220,20 +212,28 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount) {
     unsigned char *buffer, *buffer2;
     int len, len2;
-    const EC_KEY* ec_key = EVP_PKEY_get0_EC_KEY(private_key);
-    const EC_GROUP* group = EC_KEY_get0_group(ec_key);
 
     CkSession *session = (CkSession*)hSession;
     if (session == NULL) {
         return CKR_SESSION_HANDLE_INVALID;
     }
-
-    if (hObject != 0) {
-        return CKR_OBJECT_HANDLE_INVALID;
-    }
     if (pTemplate == NULL_PTR) {
         return CKR_ARGUMENTS_BAD;
     }
+
+    if (session->key_data == NULL || hObject >= session->key_data->keys_length) {
+        return CKR_OBJECT_HANDLE_INVALID;
+    }
+    RemoteKey* key = session->key_data->keys[hObject];
+
+    const unsigned char* pubkey_bytes = key->public_key;
+    EVP_PKEY* pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
+    if (pkey == NULL) {
+        return CKR_FUNCTION_FAILED;
+    }
+    const EC_KEY* ec_key = EVP_PKEY_get0_EC_KEY(pkey);
+    const EC_GROUP* group = EC_KEY_get0_group(ec_key);
+
     for (CK_ULONG i = 0; i < ulCount; i++) {
         switch (pTemplate[i].type) {
             case CKA_KEY_TYPE:
@@ -255,15 +255,15 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject, 
                 pTemplate[i].ulValueLen = sizeof(CK_BBOOL);
                 break;
             case CKA_LABEL:
-                pTemplate[i].ulValueLen = 4;
+                pTemplate[i].ulValueLen = strlen(key->key_name);
                 if (pTemplate[i].pValue != NULL_PTR) {
-                    memcpy(pTemplate[i].pValue, "derp", 4);
+                    memcpy(pTemplate[i].pValue, key->key_name, pTemplate[i].ulValueLen);
                 }
                 break;
             case CKA_ID:
-                pTemplate[i].ulValueLen = 4;
+                pTemplate[i].ulValueLen = key->public_key_length;
                 if (pTemplate[i].pValue != NULL_PTR) {
-                    memcpy(pTemplate[i].pValue, "derp", 4);
+                    memcpy(pTemplate[i].pValue, key->public_key, pTemplate[i].ulValueLen);
                 }
                 break;
             case CKA_EC_POINT:
@@ -303,14 +303,24 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject, 
                 pTemplate[i].ulValueLen = len;
                 break;
             default:
+                EVP_PKEY_free(pkey);
                 return CKR_ATTRIBUTE_TYPE_INVALID;
         }
     }
 
+    EVP_PKEY_free(pkey);
     return CKR_OK;
 }
 
 CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey) {
+    CkSession *session = (CkSession*)hSession;
+    if (session == NULL) {
+        return CKR_SESSION_HANDLE_INVALID;
+    }
+    if (session->key_data == NULL || hKey >= session->key_data->keys_length) {
+        return CKR_OBJECT_HANDLE_INVALID;
+    }
+    session->sign_key_index = hKey;
     return CKR_OK;
 }
 
@@ -324,25 +334,49 @@ CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, CK_ULONG_P
 }
 
 CK_RV C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen) {
-    EC_KEY* ec_key = EVP_PKEY_get0_EC_KEY(private_key);
-    unsigned int siglen = ECDSA_size(ec_key);
+    CkSession *session = (CkSession*)hSession;
+    if (session == NULL) {
+        return CKR_SESSION_HANDLE_INVALID;
+    }
+
+    if (pData == NULL_PTR || pulSignatureLen == NULL_PTR) {
+        return CKR_ARGUMENTS_BAD;
+    }
+
+    RemoteKey* key = session->key_data->keys[session->sign_key_index];
+
+    size_t ecdsa_size;
+    {
+        const unsigned char* pubkey_const = key->public_key;
+        EVP_PKEY* pkey = d2i_PUBKEY(NULL, &pubkey_const, key->public_key_length);
+        if (pkey == NULL) {
+            return CKR_FUNCTION_FAILED;
+        }
+        const EC_KEY* ec_key = EVP_PKEY_get0_EC_KEY(pkey);
+        ecdsa_size = ECDSA_size(ec_key);
+        EVP_PKEY_free(pkey);
+    }
+
     if (pSignature == NULL_PTR) {
-        *pulSignatureLen = siglen;
+        *pulSignatureLen = ecdsa_size;
         return CKR_OK;
     }
 
-    if (*pulSignatureLen < siglen) {
-        return CKR_BUFFER_TOO_SMALL;
-    }
+    unsigned char* sigData;
+    size_t sigLen;
+    ssh_broker_sign(key->public_key, key->public_key_length, pData, ulDataLen, &sigData, &sigLen);
 
-    ECDSA_SIG* sig = ECDSA_do_sign(pData, ulDataLen, ec_key);
+    const unsigned char* sigDataConst = sigData;
+    ECDSA_SIG* sig = d2i_ECDSA_SIG(NULL, &sigDataConst, sigLen);
     if (sig == NULL) {
         return CKR_FUNCTION_FAILED;
     }
     const BIGNUM* r = ECDSA_SIG_get0_r(sig);
     const BIGNUM* s = ECDSA_SIG_get0_s(sig);
 
-    assert(BN_num_bytes(r) + BN_num_bytes(s) <= siglen);
+    if (BN_num_bytes(r) + BN_num_bytes(s) > ecdsa_size) {
+        return CKR_FUNCTION_FAILED;
+    }
     int pos = BN_bn2bin(r, pSignature);
     pos += BN_bn2bin(s, pSignature + pos);
 

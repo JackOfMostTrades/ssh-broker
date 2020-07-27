@@ -142,6 +142,7 @@ func (a *Agent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Signat
 		PublicKey:          pubKeyBytes,
 		SignatureAlgorithm: algo,
 		Data:               data,
+		IsDigested:         false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to remote sign: %w", err)
