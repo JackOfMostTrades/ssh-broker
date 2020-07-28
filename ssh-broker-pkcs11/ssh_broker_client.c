@@ -74,6 +74,34 @@ void SignRequest_free(SignRequest* sr) {
     }
 }
 
+SshBrokerClient* SshBrokerClient_new() {
+    SshBrokerClient* sbc = malloc(sizeof(SshBrokerClient));
+    if (sbc == NULL) {
+        return NULL;
+    }
+    memset(sbc, 0, sizeof(*sbc));
+    return sbc;
+}
+
+void SshBrokerClient_free(SshBrokerClient* client) {
+    if (client == NULL) {
+        return;
+    }
+    if (client->hostname != NULL) {
+        free(client->hostname);
+    }
+    if (client->capath != NULL) {
+        free(client->capath);
+    }
+    if (client->client_cert_path != NULL) {
+        free(client->client_cert_path);
+    }
+    if (client->client_key_path != NULL) {
+        free(client->client_key_path);
+    }
+    free(client);
+}
+
 struct InputBuffer {
   const char* buffer;
   size_t length;
@@ -111,13 +139,17 @@ static size_t write_callback(void *data, size_t size, size_t nitems, void *userd
   return to_read;
 }
 
-static struct json_object* do_rest_request(const char* url, struct json_object* input) {
+static struct json_object* do_rest_request(SshBrokerClient* client, const char* path, struct json_object* input) {
   struct curl_slist *list = NULL;
   CURL *curl = NULL;
   CURLcode res;
   struct InputBuffer input_buffer;
   struct OutputBuffer output_buffer;
   struct json_object* output = NULL;
+
+  size_t url_len = strlen("https://") + strlen(client->hostname) + strlen(path);
+  char* url = malloc(url_len+1);
+  snprintf(url, url_len+1, "https://%s%s", client->hostname, path);
 
   curl = curl_easy_init();
   if (curl == NULL) {
@@ -138,11 +170,15 @@ static struct json_object* do_rest_request(const char* url, struct json_object* 
 
   list = curl_slist_append(list, "Content-Type: application/json");
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
-  // FIXME: Prefix hostname/port and just accept path as param
   curl_easy_setopt(curl, CURLOPT_URL, url);
-  //curl_easy_setopt(curl, CURLOPT_CAINFO, "FIXME");
+  if (client->capath != NULL) {
+    curl_easy_setopt(curl, CURLOPT_CAINFO, client->capath);
+  }
+  if (client->client_cert_path != NULL && client->client_key_path != NULL) {
+    curl_easy_setopt(curl, CURLOPT_SSLCERT, client->client_cert_path);
+    curl_easy_setopt(curl, CURLOPT_SSLKEY, client->client_key_path);
+  }
   curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  // FIXME: Support client cert
   res = curl_easy_perform(curl);
   if (res == CURLE_OK) {
     struct json_tokener* tok = json_tokener_new();
@@ -162,9 +198,9 @@ static struct json_object* do_rest_request(const char* url, struct json_object* 
   return output;
 }
 
-ListKeysResponse* list_keys() {
+ListKeysResponse* ssh_broker_list_keys(SshBrokerClient* client) {
   struct json_object* req = json_object_new_object();
-  struct json_object* res = do_rest_request("https://localhost:7002/REST/v1/listKeys", req);
+  struct json_object* res = do_rest_request(client, "/REST/v1/listKeys", req);
   json_object_put(req);
 
   ListKeysResponse* output = NULL;
@@ -174,7 +210,7 @@ ListKeysResponse* list_keys() {
       struct json_object* keys;
       if (json_object_object_get_ex(res, "keys", &keys) && json_object_is_type(keys, json_type_array)) {
         size_t keys_length = json_object_array_length(keys);
-        output->keys = malloc(sizeof(RemoteKey) * keys_length);
+        output->keys = malloc(sizeof(RemoteKey*) * keys_length);
         if (output->keys == NULL) {
           ListKeysResponse_free(output);
           json_object_put(res);
@@ -210,7 +246,8 @@ ListKeysResponse* list_keys() {
   return output;
 }
 
-void ssh_broker_sign(const unsigned char* public_key, size_t public_key_length,
+void ssh_broker_sign(SshBrokerClient* client,
+                     const unsigned char* public_key, size_t public_key_length,
                      const unsigned char* dgst, size_t dgst_length,
                      unsigned char** pOutSignature, size_t* pOutSignatureLength) {
 
@@ -225,7 +262,7 @@ void ssh_broker_sign(const unsigned char* public_key, size_t public_key_length,
   free(dgst_b64);
   json_object_object_add(req, "isDigested", json_object_new_boolean(TRUE));
 
-  struct json_object* res = do_rest_request("https://localhost:7002/REST/v1/sign", req);
+  struct json_object* res = do_rest_request(client, "/REST/v1/sign", req);
   json_object_put(req);
 
   *pOutSignature = NULL;

@@ -1,7 +1,7 @@
 all: ssh-broker-pkcs11.so
 
 clean:
-	rm -f ssh-broker-pkcs11.so
+	rm -f ssh-broker-pkcs11.so ssh_broker_pkcs11_test ssh_broker_client_test
 
 test: ssh_broker_pkcs11_test ssh_broker_client_test
 ssh_broker_pkcs11_test: ssh_broker_pkcs11_test.c ssh-broker-pkcs11.so

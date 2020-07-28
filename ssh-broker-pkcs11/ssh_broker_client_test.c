@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include "ssh_broker_client.h"
 
 void dump_bytes(const unsigned char* data, size_t datalen) {
@@ -8,7 +9,11 @@ void dump_bytes(const unsigned char* data, size_t datalen) {
 }
 
 int main(int argc, char** argv) {
-    ListKeysResponse* res = list_keys();
+    SshBrokerClient* client = SshBrokerClient_new();
+    client->hostname = strdup("localhost:7002");
+    client->capath = strdup("ca.pem");
+
+    ListKeysResponse* res = ssh_broker_list_keys(client);
 
     if (res == NULL) {
         printf("Error calling list_keys()\n");
@@ -32,7 +37,7 @@ int main(int argc, char** argv) {
 
       size_t sigLen;
       unsigned char* sig;
-      ssh_broker_sign(key->public_key, key->public_key_length,
+      ssh_broker_sign(client, key->public_key, key->public_key_length,
         dgst, sizeof(DATA), &sig, &sigLen);
       printf("  keys[%lu].sig=", i);
       if (sig == NULL) {
@@ -46,5 +51,6 @@ int main(int argc, char** argv) {
     }
 
     ListKeysResponse_free(res);
+    SshBrokerClient_free(client);
     return 0;
 }

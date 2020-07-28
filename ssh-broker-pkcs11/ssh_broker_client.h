@@ -25,7 +25,18 @@ typedef struct _SignRequest {
 SignRequest* SignRequest_new();
 void SignRequest_free(SignRequest*);
 
-ListKeysResponse* list_keys();
-void ssh_broker_sign(const unsigned char* public_key, size_t public_key_length,
+typedef struct _SshBrokerClient {
+    char* hostname;
+    char* capath;
+    char* client_cert_path;
+    char* client_key_path;
+} SshBrokerClient;
+
+SshBrokerClient* SshBrokerClient_new();
+void SshBrokerClient_free(SshBrokerClient*);
+
+ListKeysResponse* ssh_broker_list_keys(SshBrokerClient* client);
+void ssh_broker_sign(SshBrokerClient* client,
+                     const unsigned char* public_key, size_t public_key_length,
                      const unsigned char* dgst, size_t dgst_length,
                      unsigned char** pOutSignature, size_t* pOutSignatureLength);

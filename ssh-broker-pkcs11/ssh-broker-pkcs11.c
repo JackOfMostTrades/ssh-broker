@@ -4,10 +4,122 @@
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 #include <pkcs11.h>
+#include <json-c/json.h>
 #include "ssh_broker_client.h"
 
 static_assert(sizeof(CK_SESSION_HANDLE) >= sizeof(void*), "Session handles are not big enough to hold a pointer to the session struct on this architecture");
 static_assert(sizeof(CK_OBJECT_HANDLE) >= sizeof(void*), "Object handles are not big enough to hold a pointer to the session struct on this architecture");
+
+static json_object* config = NULL;
+static SshBrokerClient* ssh_broker_client = NULL;
+
+// Returns the configuration value for the given key. The returned string does not need to be freed as it is owned by
+// the configuration instance. However, any strings returned will be freed when C_Finalize is called, so if something
+// needs to live longer than that, make sure to use strdup(). Will return NULL if no config value is set for the key.
+static const char* get_config(const char* key) {
+    if (config == NULL || !json_object_is_type(config, json_type_object)) {
+        return NULL;
+    }
+    struct json_object* val;
+    if (json_object_object_get_ex(config, key, &val) && json_object_is_type(val, json_type_string)) {
+        return json_object_get_string(val);
+    }
+    return NULL;
+}
+
+static CK_RV load_config() {
+    CK_RV res = CKR_OK;
+    char* paths[2];
+    paths[0] = "/etc/ssh-broker-pkcs11/config.json";
+    paths[1] = NULL;
+
+    char* xdg_config_home = getenv("XDG_CONFIG_HOME");
+    CK_BBOOL free_xdg_config_home = CK_FALSE;
+    if (xdg_config_home == NULL) {
+        char* home = getenv("HOME");
+        if (home != NULL) {
+            size_t len = strlen(home) + strlen("/.config");
+            xdg_config_home = malloc(len+1);
+            if (xdg_config_home == NULL) {
+                res = CKR_HOST_MEMORY;
+                goto cleanup;
+            }
+            free_xdg_config_home = CK_TRUE;
+            snprintf(xdg_config_home, len+1, "%s/.config", home);
+        }
+    }
+    if (xdg_config_home == NULL) {
+        paths[1] = NULL;
+    } else {
+        size_t len = strlen(xdg_config_home) + strlen("/ssh-broker-pkcs11/config.json");
+        paths[1] = malloc(len+1);
+        if (paths[1] == NULL) {
+            res = CKR_HOST_MEMORY;
+            goto cleanup;
+        }
+        snprintf(paths[1], len+1, "%s/ssh-broker-pkcs11/config.json", xdg_config_home);
+        if (free_xdg_config_home && xdg_config_home != NULL) {
+            free(xdg_config_home);
+        }
+    }
+
+    config = json_object_new_object();
+    for (size_t i = 0; i < sizeof(paths)/sizeof(char*); i++) {
+        if (paths[i] == NULL) {
+            continue;
+        }
+        FILE* f = fopen(paths[i], "r");
+        if (f == NULL) {
+            continue;
+        }
+
+        fseek(f, 0L, SEEK_END);
+        size_t file_size = ftell(f);
+        fseek(f, 0L, SEEK_SET);
+
+        char* buffer = malloc(file_size);
+        if (buffer == NULL) {
+            fclose(f);
+            res = CKR_HOST_MEMORY;
+            goto cleanup;
+        }
+
+        size_t actual = fread(buffer, file_size, 1, f);
+        fclose(f);
+        if (actual != 1) {
+            res = CKR_FUNCTION_FAILED;
+            goto cleanup;
+        }
+
+        struct json_tokener* tok = json_tokener_new();
+        struct json_object* conf = json_tokener_parse_ex(tok, buffer, file_size);
+        json_tokener_free(tok);
+
+        if (conf != NULL) {
+            if (json_object_is_type(conf, json_type_object)) {
+                json_object_object_foreach(conf, key, val) {
+                    if (json_object_is_type(val, json_type_string)) {
+                        json_object_object_add(config, key, json_object_new_string(json_object_get_string(val)));
+                    }
+                }
+            }
+            json_object_put(conf);
+        }
+    }
+
+cleanup:
+    if (free_xdg_config_home && xdg_config_home != NULL) {
+        free(xdg_config_home);
+    }
+    if (paths[1] != NULL) {
+        free(paths[1]);
+    }
+    if (config != NULL && res != CKR_OK) {
+        json_object_put(config);
+        config = NULL;
+    }
+    return res;
+}
 
 typedef struct _session {
     CK_ATTRIBUTE_PTR find_objects_template;
@@ -19,10 +131,41 @@ typedef struct _session {
 } CkSession;
 
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
+    CK_RV res = load_config();
+    if (res != CKR_OK) {
+        return res;
+    }
+
+    ssh_broker_client = SshBrokerClient_new();
+    const char* val;
+    if ((val = get_config("hostname")) != NULL) {
+        ssh_broker_client->hostname = strdup(val);
+    } else {
+        C_Finalize(NULL_PTR);
+        return CKR_ARGUMENTS_BAD;
+    }
+    if ((val = get_config("capath")) != NULL) {
+        ssh_broker_client->capath = strdup(val);
+    }
+    if ((val = get_config("client_cert_path")) != NULL) {
+        ssh_broker_client->client_cert_path = strdup(val);
+    }
+    if ((val = get_config("client_key_path")) != NULL) {
+        ssh_broker_client->client_key_path = strdup(val);
+    }
+
     return CKR_OK;
 }
 
 CK_RV C_Finalize(CK_VOID_PTR pReserved) {
+    if (ssh_broker_client != NULL) {
+        SshBrokerClient_free(ssh_broker_client);
+        ssh_broker_client = NULL;
+    }
+    if (config != NULL) {
+        json_object_put(config);
+        config = NULL;
+    }
     return CKR_OK;
 }
 
@@ -93,7 +236,7 @@ CK_RV C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApplication,
     if (session == NULL) {
         return CKR_HOST_MEMORY;
     }
-    session->key_data = list_keys();
+    session->key_data = ssh_broker_list_keys(ssh_broker_client);
 
     *phSession = (CK_SESSION_HANDLE)session;
     return CKR_OK;
@@ -364,7 +507,7 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ulDataLen, 
 
     unsigned char* sigData;
     size_t sigLen;
-    ssh_broker_sign(key->public_key, key->public_key_length, pData, ulDataLen, &sigData, &sigLen);
+    ssh_broker_sign(ssh_broker_client, key->public_key, key->public_key_length, pData, ulDataLen, &sigData, &sigLen);
 
     const unsigned char* sigDataConst = sigData;
     ECDSA_SIG* sig = d2i_ECDSA_SIG(NULL, &sigDataConst, sigLen);
