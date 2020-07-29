@@ -47,6 +47,21 @@ Then you can access servers by setting you SSH_AUTH_SOCK environment variable:
 SSH_AUTH_SOCK=/tmp/ssh-broker-agent.sock ssh user@server.example.com
 ```
 
+# PKCS#11 Provider
+
+Rather than using a custom ssh-agent, this project also provides a PKCS#11 provider that can be added to the standard OpenSSH ssh-agent. Depending on this use-case, this may be easier than managing the execution of a separate ssh-agent. As an example:
+
+```bash
+$ ssh-add -s ssh-broker-pkcs11.so
+Enter passphrase for PKCS#11: 
+Card added: ssh-broker-pkcs11.so
+$ ssh-add -L
+ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBNZMszmJkWoW0DMkqRK8+aS/B+b+zVyWGoWJJaH9APo/joa5AoZPc5RxnPiiQhnX/B6JiK9NQDRaQWJOkaUtN5Q= foo
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDBdxnnv6UKfxObNKjG/rXDb8im+wOANsUP/ybKGXgf0AlijRHvGYncH2kPyaAhfNvzaS4pjlTPlLXhoucVQJaeVJlLJlV9zbTGYk80zQrNiVaVJ6g5bJikKhWRkoeNkX8iZAX1rTAB2VMpfeoG6hoX0lUudhvZHqmth+SboL8q7MZaLnsIrQnf/cuYTVQn+WYGrkTSGtI6CZNLN3AL088m8D6ijF6pmNbR9t/d8RKgFjvSBc4yCxqUGJDXpVcq72Zo/LezIi0TtOrgRRY7ac6/9jq+aHFrPz1HiX2LkwINnvpBWq0QvW8eY0FWjJ6chW5yncF3MfoYC5bmzOQBUFcv rsa_sample
+```
+
+When loaded, the provider looks for a configuration file in `/etc/ssh-broker-pkcs11/config.json` and `${XDG_CONFIG_HOME}/ssh-broker-pkcs11/config.json`. This configuration file can contain `hostname`, `capath`, `client_cert_path`, and `client_key_path` directives. At least `hostname` is required.
+
 ## Tips
 
 You can configure SSH to startup the agent automatically and use it with an `/.ssh/config` such as the following:
