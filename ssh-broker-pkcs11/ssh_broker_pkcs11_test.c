@@ -11,18 +11,18 @@ void dump_bytes(const char* name, const unsigned char* bytes, unsigned long len)
     printf("\n");
 }
 
-CK_RV get_and_dump_attribute(CK_FUNCTION_LIST* f, CK_SESSION_HANDLE session, CK_ATTRIBUTE_TYPE type, const char* name) {
+CK_RV get_and_dump_attribute(CK_FUNCTION_LIST* f, CK_SESSION_HANDLE session, CK_OBJECT_HANDLE obj, CK_ATTRIBUTE_TYPE type, const char* name) {
     CK_ATTRIBUTE attrs[1];
     attrs[0].type = type;
     attrs[0].pValue = NULL;
     attrs[0].ulValueLen = 0;
-    CK_RV res = f->C_GetAttributeValue(session, (CK_OBJECT_HANDLE)0, attrs, 1);
+    CK_RV res = f->C_GetAttributeValue(session, obj, attrs, 1);
     if (res != CKR_OK) {
         printf("Fail C_GetAttributeValue for attribute size, res=%ld\n", res);
         return res;
     }
     attrs[0].pValue = malloc(attrs[0].ulValueLen);
-    res = f->C_GetAttributeValue(session, (CK_OBJECT_HANDLE)0, attrs, 1);
+    res = f->C_GetAttributeValue(session, obj, attrs, 1);
     if (res != CKR_OK) {
         printf("Fail C_GetAttributeValue for getting attribute, res=%ld\n", res);
         return res;
@@ -70,40 +70,101 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    res = get_and_dump_attribute(f, session, CKA_EC_PARAMS, "group");
+    res = f->C_FindObjectsInit(session, NULL_PTR, 0);
     if (res != CKR_OK) {
-        printf("Fail get_and_dump_attribute for attribute CKa_EC_PARAMS\n");
+        printf("Fail C_FindObjectsInit, res=%ld\n", res);
         return 1;
     }
 
-    res = get_and_dump_attribute(f, session, CKA_EC_POINT, "point");
+    CK_ULONG objectCount = 1;
+    while (objectCount == 1) {
+        CK_OBJECT_HANDLE obj;
+        res = f->C_FindObjects(session, &obj, 1, &objectCount);
+        if (res != CKR_OK) {
+            printf("Fail C_FindObjects, res=%ld\n", res);
+            return 1;
+        }
+        if (objectCount == 0) {
+            break;
+        }
+
+        CK_OBJECT_CLASS key_type;
+        CK_ATTRIBUTE attrs[1];
+        attrs[0].type = CKA_KEY_TYPE;
+        attrs[0].pValue = &key_type;
+        attrs[0].ulValueLen = 0;
+        CK_RV res = f->C_GetAttributeValue(session, obj, attrs, 1);
+        if (res != CKR_OK) {
+            printf("Fail C_GetAttributeValue for CKA_KEY_TYPE, res=%ld\n", res);
+            return 1;
+        }
+
+        if (key_type == CKK_RSA) {
+            res = get_and_dump_attribute(f, session, obj, CKA_PUBLIC_EXPONENT, "exponent");
+            if (res != CKR_OK) {
+                printf("Fail get_and_dump_attribute for attribute CKA_PUBLIC_EXPONENT\n");
+                return 1;
+            }
+
+            res = get_and_dump_attribute(f, session, obj, CKA_MODULUS, "modulus");
+            if (res != CKR_OK) {
+                printf("Fail get_and_dump_attribute for attribute CKA_MODULUS\n");
+                return 1;
+            }
+        } else if (key_type == CKK_ECDSA) {
+            res = get_and_dump_attribute(f, session, obj, CKA_EC_PARAMS, "group");
+            if (res != CKR_OK) {
+                printf("Fail get_and_dump_attribute for attribute CKA_EC_PARAMS\n");
+                return 1;
+            }
+
+            res = get_and_dump_attribute(f, session, obj, CKA_EC_POINT, "point");
+            if (res != CKR_OK) {
+                printf("Fail get_and_dump_attribute for attribute CKA_EC_POINT\n");
+                return 1;
+            }
+        }
+
+        const unsigned char DATA[] = {
+          0xb5, 0xbb, 0x9d, 0x80, 0x14, 0xa0, 0xf9, 0xb1, 0xd6, 0x1e, 0x21, 0xe7,
+          0x96, 0xd7, 0x8d, 0xcc, 0xdf, 0x13, 0x52, 0xf2, 0x3c, 0xd3, 0x28, 0x12,
+          0xf4, 0x85, 0x0b, 0x87, 0x8a, 0xe4, 0x94, 0x4c
+        };
+
+        CK_MECHANISM mechanism;
+        if (key_type == CKK_RSA) {
+            mechanism.mechanism = CKM_RSA_PKCS;
+        } else if (key_type == CKK_ECDSA) {
+            mechanism.mechanism = CKM_ECDSA;
+        }
+        res = f->C_SignInit(session, &mechanism, obj);
+        if (res != CKR_OK) {
+            printf("Fail C_SignInit, res=%ld\n", res);
+            return 1;
+        }
+
+        unsigned char *dgst = (unsigned char*)DATA;
+        CK_ULONG siglen = 0;
+        res = f->C_Sign(session, dgst, sizeof(DATA), NULL_PTR, &siglen);
+        if (res != CKR_OK) {
+            printf("Failed to call C_Sign to get signature size, res=%ld\n", res);
+            return 1;
+        }
+
+        unsigned char* sig = malloc(siglen);
+        res = f->C_Sign(session, dgst, sizeof(DATA), sig, &siglen);
+        if (res != CKR_OK) {
+            printf("Fail C_Sign, res=%ld\n", res);
+            return 1;
+        }
+        dump_bytes("sig", sig, siglen);
+        free(sig);
+    }
+    res = f->C_FindObjectsFinal(session);
     if (res != CKR_OK) {
-        printf("Fail get_and_dump_attribute for attribute CKa_EC_PARAMS\n");
+        printf("Fail C_FindObjectsFinal, res=%ld\n", res);
         return 1;
     }
-
-    const unsigned char DATA[] = {
-      0xb5, 0xbb, 0x9d, 0x80, 0x14, 0xa0, 0xf9, 0xb1, 0xd6, 0x1e, 0x21, 0xe7,
-      0x96, 0xd7, 0x8d, 0xcc, 0xdf, 0x13, 0x52, 0xf2, 0x3c, 0xd3, 0x28, 0x12,
-      0xf4, 0x85, 0x0b, 0x87, 0x8a, 0xe4, 0x94, 0x4c
-    };
-
-    unsigned char *dgst = (unsigned char*)DATA;
-    CK_ULONG siglen = 0;
-    res = f->C_Sign(session, dgst, sizeof(DATA), NULL_PTR, &siglen);
-    if (res != CKR_OK) {
-        printf("Failed to call C_Sign to get signature size, res=%ld\n", res);
-        return 1;
-    }
-
-    unsigned char* sig = malloc(siglen);
-    res = f->C_Sign(session, dgst, sizeof(DATA), sig, &siglen);
-    if (res != CKR_OK) {
-        printf("Fail C_Sign, res=%ld\n", res);
-        return 1;
-    }
-    dump_bytes("sig", sig, siglen);
-    free(sig);
 
     res = f->C_CloseSession(session);
     if (res != CKR_OK) {

@@ -246,27 +246,51 @@ ListKeysResponse* ssh_broker_list_keys(SshBrokerClient* client) {
   return output;
 }
 
-void ssh_broker_sign(SshBrokerClient* client,
+void ssh_broker_sign(SshBrokerClient* client, SignatureAlgorithm signature_algorithm,
                      const unsigned char* public_key, size_t public_key_length,
                      const unsigned char* dgst, size_t dgst_length,
                      unsigned char** pOutSignature, size_t* pOutSignatureLength) {
+
+  *pOutSignature = NULL;
+  *pOutSignatureLength = 0;
+
+  const char* signature_algorithm_string;
+  switch (signature_algorithm) {
+    case NONE_WITH_ECDSA:
+      signature_algorithm_string = "NoneWithECDSA";
+      break;
+    case SHA256_WITH_ECDSA:
+      signature_algorithm_string = "SHA256withECDSA";
+      break;
+    case NONE_WITH_RSA:
+      signature_algorithm_string = "NoneWithRSA";
+      break;
+    case SHA1_WITH_RSA:
+      signature_algorithm_string = "SHA1withRSA";
+      break;
+    case SHA256_WITH_RSA:
+      signature_algorithm_string = "SHA256withRSA";
+      break;
+    case SHA512_WITH_RSA:
+      signature_algorithm_string = "SHA512withRSA";
+      break;
+    default:
+      return;
+  }
 
   struct json_object* req = json_object_new_object();
   char* public_key_b64 = base64_encode(public_key, public_key_length);
   json_object_object_add(req, "publicKey", json_object_new_string(public_key_b64));
   free(public_key_b64);
-  json_object_object_add(req, "signatureAlgorithm", json_object_new_string("SHA256withECDSA"));
+  json_object_object_add(req, "signatureAlgorithm", json_object_new_string(signature_algorithm_string));
 
   char* dgst_b64 = base64_encode(dgst, dgst_length);
   json_object_object_add(req, "data", json_object_new_string(dgst_b64));
   free(dgst_b64);
-  json_object_object_add(req, "isDigested", json_object_new_boolean(TRUE));
 
   struct json_object* res = do_rest_request(client, "/REST/v1/sign", req);
   json_object_put(req);
 
-  *pOutSignature = NULL;
-  *pOutSignatureLength = 0;
   if (res != NULL) {
 
     struct json_object* sigObj;

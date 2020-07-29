@@ -37,7 +37,8 @@ int main(int argc, char** argv) {
 
       size_t sigLen;
       unsigned char* sig;
-      ssh_broker_sign(client, key->public_key, key->public_key_length,
+      ssh_broker_sign(client, NONE_WITH_ECDSA,
+        key->public_key, key->public_key_length,
         dgst, sizeof(DATA), &sig, &sigLen);
       printf("  keys[%lu].sig=", i);
       if (sig == NULL) {

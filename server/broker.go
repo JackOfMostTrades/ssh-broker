@@ -43,12 +43,16 @@ func (s *sshBrokerImpl) Sign(ctx context.Context, request *common.SignRequest) (
 
 			var hash crypto.Hash
 			switch request.SignatureAlgorithm {
+			case common.SignatureAlgorithm_NoneWithRSA:
+				hash = 0
 			case common.SignatureAlgorithm_SHA1withRSA:
 				hash = crypto.SHA1
 			case common.SignatureAlgorithm_SHA256withRSA:
 				hash = crypto.SHA256
 			case common.SignatureAlgorithm_SHA512withRSA:
 				hash = crypto.SHA512
+			case common.SignatureAlgorithm_NoneWithECDSA:
+				hash = 0
 			case common.SignatureAlgorithm_SHA256withECDSA:
 				hash = crypto.SHA256
 			default:
@@ -56,7 +60,7 @@ func (s *sshBrokerImpl) Sign(ctx context.Context, request *common.SignRequest) (
 			}
 
 			var digest []byte
-			if request.IsDigested {
+			if hash == 0 {
 				digest = request.Data
 			} else {
 				h := hash.New()

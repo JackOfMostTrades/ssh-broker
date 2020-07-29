@@ -128,6 +128,7 @@ typedef struct _session {
     ListKeysResponse* key_data;
 
     unsigned long sign_key_index;
+    CK_MECHANISM_TYPE sign_mechanism;
 } CkSession;
 
 CK_RV C_Initialize(CK_VOID_PTR pInitArgs) {
@@ -257,6 +258,166 @@ CK_RV C_CloseAllSessions(CK_SLOT_ID slotID) {
     return CKR_FUNCTION_FAILED;
 }
 
+CK_RV getAttributeValue(RemoteKey* key, CK_ATTRIBUTE_TYPE attr, CK_VOID_PTR pValue, CK_ULONG_PTR pulValueLen) {
+
+    const unsigned char* pubkey_bytes = key->public_key;
+    unsigned char* buffer, *buffer2;
+    EVP_PKEY* pkey;
+    const RSA* rsa;
+    const EC_KEY* ec_key;
+    const EC_GROUP* ec_group;
+    const BIGNUM* bn;
+    size_t len, len2;
+
+    switch (attr) {
+        case CKA_CLASS:
+            *pulValueLen = sizeof(CK_OBJECT_CLASS);
+            if (pValue != NULL_PTR) {
+                *((CK_OBJECT_CLASS*)pValue) = CKO_PRIVATE_KEY;
+            }
+            break;
+        case CKA_ID:
+            *pulValueLen = key->public_key_length;
+            if (pValue != NULL_PTR) {
+                memcpy(pValue, key->public_key, key->public_key_length);
+            }
+            break;
+        case CKA_SIGN:
+            *pulValueLen = sizeof(CK_BBOOL);
+            if (pValue != NULL_PTR) {
+                *((CK_BBOOL*)pValue) = CK_TRUE;
+            }
+            break;
+        case CKA_KEY_TYPE:
+            pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
+            if (pkey == NULL) {
+                return CKR_FUNCTION_FAILED;
+            }
+
+            CK_OBJECT_CLASS key_type;
+            switch (EVP_PKEY_base_id(pkey)) {
+                case EVP_PKEY_RSA:
+                    key_type = CKK_RSA;
+                    break;
+                case EVP_PKEY_EC:
+                    key_type = CKK_ECDSA;
+                    break;
+                default:
+                    EVP_PKEY_free(pkey);
+                    return CKR_ATTRIBUTE_TYPE_INVALID;
+            }
+
+            *pulValueLen = sizeof(CK_OBJECT_CLASS);
+            if (pValue != NULL_PTR) {
+                *((CK_OBJECT_CLASS*)pValue) = key_type;
+            }
+            break;
+        case CKA_ALWAYS_AUTHENTICATE:
+            *pulValueLen = sizeof(CK_BBOOL);
+            if (pValue != NULL_PTR) {
+                *((CK_BBOOL*)pValue) = CK_FALSE;
+            }
+            break;
+        case CKA_LABEL:
+            *pulValueLen = strlen(key->key_name);
+            if (pValue != NULL_PTR) {
+                memcpy(pValue, key->key_name, *pulValueLen);
+            }
+            break;
+        case CKA_MODULUS:
+            pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
+            if (pkey == NULL) {
+                return CKR_FUNCTION_FAILED;
+            }
+            if (EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA) {
+                EVP_PKEY_free(pkey);
+                return CKR_ATTRIBUTE_TYPE_INVALID;
+            }
+            rsa = EVP_PKEY_get0_RSA(pkey);
+            bn = RSA_get0_n(rsa);
+
+            *pulValueLen = BN_num_bytes(bn);
+            if (pValue != NULL_PTR) {
+                BN_bn2bin(bn, pValue);
+            }
+            break;
+        case CKA_PUBLIC_EXPONENT:
+            pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
+            if (pkey == NULL) {
+                return CKR_FUNCTION_FAILED;
+            }
+            if (EVP_PKEY_base_id(pkey) != EVP_PKEY_RSA) {
+                EVP_PKEY_free(pkey);
+                return CKR_ATTRIBUTE_TYPE_INVALID;
+            }
+            rsa = EVP_PKEY_get0_RSA(pkey);
+            bn = RSA_get0_e(rsa);
+
+            *pulValueLen = BN_num_bytes(bn);
+            if (pValue != NULL_PTR) {
+                BN_bn2bin(bn, pValue);
+            }
+            break;
+        case CKA_EC_POINT:
+            pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
+            if (pkey == NULL) {
+                return CKR_FUNCTION_FAILED;
+            }
+            if (EVP_PKEY_base_id(pkey) != EVP_PKEY_EC) {
+                EVP_PKEY_free(pkey);
+                return CKR_ATTRIBUTE_TYPE_INVALID;
+            }
+            ec_key = EVP_PKEY_get0_EC_KEY(pkey);
+
+            buffer = NULL;
+            len = i2o_ECPublicKey(ec_key, &buffer);
+
+            // Wrap the point in an ASN.1 octet string
+            ASN1_OCTET_STRING* os = ASN1_STRING_new();
+            ASN1_OCTET_STRING_set(os, buffer, len);
+
+            buffer2 = NULL;
+            len2 = i2d_ASN1_OCTET_STRING(os, &buffer2);
+
+            *pulValueLen = len2;
+            if (pValue != NULL_PTR) {
+                memcpy(pValue, buffer2, len2);
+            }
+
+            free(buffer);
+            free(buffer2);
+            EVP_PKEY_free(pkey);
+            break;
+        case CKA_EC_PARAMS:
+            pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
+            if (pkey == NULL) {
+                return CKR_FUNCTION_FAILED;
+            }
+            if (EVP_PKEY_base_id(pkey) != EVP_PKEY_EC) {
+                EVP_PKEY_free(pkey);
+                return CKR_ATTRIBUTE_TYPE_INVALID;
+            }
+            ec_key = EVP_PKEY_get0_EC_KEY(pkey);
+            ec_group = EC_KEY_get0_group(ec_key);
+
+            buffer = NULL;
+            len = i2d_ECPKParameters(ec_group, &buffer);
+
+            *pulValueLen = len;
+            if (pValue != NULL_PTR) {
+                memcpy(pValue, buffer, len);
+            }
+
+            free(buffer);
+            EVP_PKEY_free(pkey);
+            break;
+        default:
+            return CKR_ATTRIBUTE_TYPE_INVALID;
+    }
+
+    return CKR_OK;
+}
+
 CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount) {
     CkSession *session = (CkSession*)hSession;
     if (session == NULL) {
@@ -277,35 +438,40 @@ CK_RV C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTemplate, 
 }
 
 static CK_BBOOL matches_template(CkSession* session, RemoteKey* key) {
-    CK_OBJECT_CLASS clazz;
+    unsigned char* buffer = NULL;
+    CK_ULONG buffer_size = 0;
+    CK_RV res;
+
     for (CK_ULONG i = 0; i < session->find_objects_template_count; i++) {
         CK_ATTRIBUTE attr = session->find_objects_template[i];
-        switch (attr.type) {
-            case CKA_CLASS:
-                clazz = *((CK_OBJECT_CLASS*)attr.pValue);
-                if (clazz != CKO_PRIVATE_KEY && clazz != CKO_PUBLIC_KEY) {
-                    return CK_FALSE;
-                }
-                break;
-            case CKA_ID:
-                if (attr.ulValueLen != key->public_key_length) {
-                    return CK_FALSE;
-                }
-                const unsigned char* attrVal = (const unsigned char*)attr.pValue;
-                for (size_t i = 0; i < key->public_key_length; i++) {
-                    if (key->public_key[i] != attrVal[i]) {
-                        return CK_FALSE;
-                    }
-                }
-                break;
-            case CKA_SIGN:
-                // All objects allow signing
-                if (*((CK_BBOOL*)attr.pValue) == CK_FALSE) {
-                    return CK_FALSE;
-                }
-                break;
-            default:
+
+        // Special case for CKA_CLASS because we want to match CKO_PUBLIC_KEY even though we have a CKO_PRIVATE_KEY
+        if (attr.type == CKA_CLASS) {
+            CK_OBJECT_CLASS clazz = *((CK_OBJECT_CLASS*)attr.pValue);
+            if (clazz != CKO_PUBLIC_KEY && clazz != CKO_PRIVATE_KEY) {
                 return CK_FALSE;
+            }
+            continue;
+        }
+
+        // Otherwise pull the real attribute value and check for a byte-array-equality on the value.
+        res = getAttributeValue(key, attr.type, NULL_PTR, &buffer_size);
+        if (res != CKR_OK) {
+            return res;
+        }
+        if (buffer_size != attr.ulValueLen) {
+            return CK_FALSE;
+        }
+        buffer = malloc(buffer_size);
+        if (buffer == NULL) {
+            return CKR_HOST_MEMORY;
+        }
+        res = getAttributeValue(key, attr.type, buffer, &buffer_size);
+        if (res != CKR_OK) {
+            return res;
+        }
+        if (memcmp(buffer, attr.pValue, buffer_size) != 0) {
+            return CK_FALSE;
         }
     }
     return CK_TRUE;
@@ -353,9 +519,6 @@ CK_RV C_FindObjectsFinal(CK_SESSION_HANDLE hSession) {
 }
 
 CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount) {
-    unsigned char *buffer, *buffer2;
-    int len, len2;
-
     CkSession *session = (CkSession*)hSession;
     if (session == NULL) {
         return CKR_SESSION_HANDLE_INVALID;
@@ -369,89 +532,12 @@ CK_RV C_GetAttributeValue(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject, 
     }
     RemoteKey* key = session->key_data->keys[hObject];
 
-    const unsigned char* pubkey_bytes = key->public_key;
-    EVP_PKEY* pkey = d2i_PUBKEY(NULL, &pubkey_bytes, key->public_key_length);
-    if (pkey == NULL) {
-        return CKR_FUNCTION_FAILED;
-    }
-    const EC_KEY* ec_key = EVP_PKEY_get0_EC_KEY(pkey);
-    const EC_GROUP* group = EC_KEY_get0_group(ec_key);
-
     for (CK_ULONG i = 0; i < ulCount; i++) {
-        switch (pTemplate[i].type) {
-            case CKA_KEY_TYPE:
-                if (pTemplate[i].pValue != NULL_PTR) {
-                    if (pTemplate[i].ulValueLen < sizeof(CK_OBJECT_CLASS)) {
-                        return CKR_BUFFER_TOO_SMALL;
-                    }
-                    *((CK_OBJECT_CLASS_PTR)pTemplate[i].pValue) = CKK_ECDSA;
-                }
-                pTemplate[i].ulValueLen = sizeof(CK_OBJECT_CLASS);
-                break;
-            case CKA_ALWAYS_AUTHENTICATE:
-                if (pTemplate[i].pValue != NULL_PTR) {
-                    if (pTemplate[i].ulValueLen < sizeof(CK_BBOOL)) {
-                        return CKR_BUFFER_TOO_SMALL;
-                    }
-                    *((CK_OBJECT_CLASS_PTR)pTemplate[i].pValue) = CK_FALSE;
-                }
-                pTemplate[i].ulValueLen = sizeof(CK_BBOOL);
-                break;
-            case CKA_LABEL:
-                pTemplate[i].ulValueLen = strlen(key->key_name);
-                if (pTemplate[i].pValue != NULL_PTR) {
-                    memcpy(pTemplate[i].pValue, key->key_name, pTemplate[i].ulValueLen);
-                }
-                break;
-            case CKA_ID:
-                pTemplate[i].ulValueLen = key->public_key_length;
-                if (pTemplate[i].pValue != NULL_PTR) {
-                    memcpy(pTemplate[i].pValue, key->public_key, pTemplate[i].ulValueLen);
-                }
-                break;
-            case CKA_EC_POINT:
-                buffer = NULL;
-                len = i2o_ECPublicKey(ec_key, &buffer);
-
-                // Wrap the point in an ASN.1 octet string
-                ASN1_OCTET_STRING* os = ASN1_STRING_new();
-                ASN1_OCTET_STRING_set(os, buffer, len);
-
-                buffer2 = NULL;
-                len2 = i2d_ASN1_OCTET_STRING(os, &buffer2);
-
-                if (pTemplate[i].pValue != NULL_PTR) {
-                    if (pTemplate[i].ulValueLen < len2) {
-                        free(buffer);
-                        free(buffer2);
-                        return CKR_BUFFER_TOO_SMALL;
-                    }
-                    memcpy(pTemplate[i].pValue, buffer2, len2);
-                }
-                free(buffer);
-                free(buffer2);
-                pTemplate[i].ulValueLen = len2;
-                break;
-            case CKA_EC_PARAMS:
-                buffer = NULL;
-                len = i2d_ECPKParameters(group, &buffer);
-                if (pTemplate[i].pValue != NULL_PTR) {
-                    if (pTemplate[i].ulValueLen < len) {
-                        free(buffer);
-                        return CKR_BUFFER_TOO_SMALL;
-                    }
-                    memcpy(pTemplate[i].pValue, buffer, len);
-                }
-                free(buffer);
-                pTemplate[i].ulValueLen = len;
-                break;
-            default:
-                EVP_PKEY_free(pkey);
-                return CKR_ATTRIBUTE_TYPE_INVALID;
+        CK_RV res = getAttributeValue(key, pTemplate[i].type, pTemplate[i].pValue, &pTemplate[i].ulValueLen);
+        if (res != CKR_OK) {
+            return res;
         }
     }
-
-    EVP_PKEY_free(pkey);
     return CKR_OK;
 }
 
@@ -460,10 +546,15 @@ CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJ
     if (session == NULL) {
         return CKR_SESSION_HANDLE_INVALID;
     }
+    if (pMechanism == NULL_PTR) {
+        return CKR_ARGUMENTS_BAD;
+    }
     if (session->key_data == NULL || hKey >= session->key_data->keys_length) {
         return CKR_OBJECT_HANDLE_INVALID;
     }
     session->sign_key_index = hKey;
+    session->sign_mechanism = pMechanism->mechanism;
+
     return CKR_OK;
 }
 
@@ -488,44 +579,77 @@ CK_RV C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ulDataLen, 
 
     RemoteKey* key = session->key_data->keys[session->sign_key_index];
 
-    size_t ecdsa_size;
-    {
-        const unsigned char* pubkey_const = key->public_key;
-        EVP_PKEY* pkey = d2i_PUBKEY(NULL, &pubkey_const, key->public_key_length);
-        if (pkey == NULL) {
+    size_t sig_size;
+    const unsigned char* pubkey_const = key->public_key;
+    EVP_PKEY* pkey = d2i_PUBKEY(NULL, &pubkey_const, key->public_key_length);
+    const EC_KEY* ec_key;
+    const RSA* rsa;
+
+    int key_type = EVP_PKEY_base_id(pkey);
+    switch (key_type) {
+        case EVP_PKEY_RSA:
+            rsa = EVP_PKEY_get0_RSA(pkey);
+            sig_size = BN_num_bytes(RSA_get0_n(rsa));
+            break;
+        case EVP_PKEY_EC:
+            ec_key = EVP_PKEY_get0_EC_KEY(pkey);
+            sig_size = ECDSA_size(ec_key);
+            break;
+        default:
+            EVP_PKEY_free(pkey);
             return CKR_FUNCTION_FAILED;
-        }
-        const EC_KEY* ec_key = EVP_PKEY_get0_EC_KEY(pkey);
-        ecdsa_size = ECDSA_size(ec_key);
-        EVP_PKEY_free(pkey);
+
     }
+    EVP_PKEY_free(pkey);
+    pkey = NULL;
 
     if (pSignature == NULL_PTR) {
-        *pulSignatureLen = ecdsa_size;
+        *pulSignatureLen = sig_size;
         return CKR_OK;
+    }
+
+    SignatureAlgorithm signature_algorithm;
+    switch (session->sign_mechanism) {
+        case CKM_ECDSA:
+            signature_algorithm = NONE_WITH_ECDSA;
+            break;
+        case CKM_RSA_PKCS:
+            signature_algorithm = NONE_WITH_RSA;
+            break;
+        default:
+            return CKR_ARGUMENTS_BAD;
     }
 
     unsigned char* sigData;
     size_t sigLen;
-    ssh_broker_sign(ssh_broker_client, key->public_key, key->public_key_length, pData, ulDataLen, &sigData, &sigLen);
+    ssh_broker_sign(ssh_broker_client, signature_algorithm,
+        key->public_key, key->public_key_length, pData, ulDataLen, &sigData, &sigLen);
 
     const unsigned char* sigDataConst = sigData;
-    ECDSA_SIG* sig = d2i_ECDSA_SIG(NULL, &sigDataConst, sigLen);
-    if (sig == NULL) {
-        return CKR_FUNCTION_FAILED;
+
+    if (key_type == EVP_PKEY_EC) {
+        ECDSA_SIG* sig = d2i_ECDSA_SIG(NULL, &sigDataConst, sigLen);
+        if (sig == NULL) {
+            return CKR_FUNCTION_FAILED;
+        }
+        const BIGNUM* r = ECDSA_SIG_get0_r(sig);
+        const BIGNUM* s = ECDSA_SIG_get0_s(sig);
+
+        if (BN_num_bytes(r) + BN_num_bytes(s) > sig_size) {
+            return CKR_FUNCTION_FAILED;
+        }
+        int pos = BN_bn2bin(r, pSignature);
+        pos += BN_bn2bin(s, pSignature + pos);
+        *pulSignatureLen = pos;
+        ECDSA_SIG_free(sig);
+    } else {
+        if (sigLen > sig_size) {
+            return CKR_FUNCTION_FAILED;
+        }
+        memcpy(pSignature, sigData, sigLen);
+        *pulSignatureLen = sigLen;
     }
-    const BIGNUM* r = ECDSA_SIG_get0_r(sig);
-    const BIGNUM* s = ECDSA_SIG_get0_s(sig);
 
-    if (BN_num_bytes(r) + BN_num_bytes(s) > ecdsa_size) {
-        return CKR_FUNCTION_FAILED;
-    }
-    int pos = BN_bn2bin(r, pSignature);
-    pos += BN_bn2bin(s, pSignature + pos);
-
-    ECDSA_SIG_free(sig);
-
-    *pulSignatureLen = pos;
     return CKR_OK;
 }
 

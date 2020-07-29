@@ -35,8 +35,17 @@ typedef struct _SshBrokerClient {
 SshBrokerClient* SshBrokerClient_new();
 void SshBrokerClient_free(SshBrokerClient*);
 
+typedef enum _SignatureAlgorithm {
+    NONE_WITH_ECDSA = 1,
+    SHA256_WITH_ECDSA = 2,
+    NONE_WITH_RSA = 3,
+    SHA1_WITH_RSA = 4,
+    SHA256_WITH_RSA = 5,
+    SHA512_WITH_RSA = 6,
+} SignatureAlgorithm;
+
 ListKeysResponse* ssh_broker_list_keys(SshBrokerClient* client);
-void ssh_broker_sign(SshBrokerClient* client,
+void ssh_broker_sign(SshBrokerClient* client, SignatureAlgorithm signature_algorithm,
                      const unsigned char* public_key, size_t public_key_length,
                      const unsigned char* dgst, size_t dgst_length,
                      unsigned char** pOutSignature, size_t* pOutSignatureLength);
